@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from fastapi import FastAPI,Depends,HTTPException,Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from .database import Base,engine,session
+from .database import Base,engine,session,Session as SessionLocal
 from .models import User,Hive,Visit,CareAction,Audit
 from .schemas import Login,HiveInput,VisitInput,CareInput,ExecutionInput,FollowupInput
 from .auth import current,editor,admin,hash_password,issue
@@ -15,10 +15,14 @@ from . import care_service
 from .screen_model import reference_model
 from .resource_routes import router as resources
 from .season_routes import router as seasons
+from .reference_routes import router as references
+from .reference_service import ensure_baseline
 queue=redis.Redis.from_url(os.getenv('REDIS_URL','redis://redis:6379/0'),decode_responses=True)
 @asynccontextmanager
 async def lifespan(app):
     Base.metadata.create_all(engine)
+    with SessionLocal() as bootstrap:
+        ensure_baseline(bootstrap)
     if os.getenv('SEED_DEMO','true').lower()=='true':
         try:
             from scripts.seed_demo import seed
@@ -36,7 +40,7 @@ async def recover(request:Request,call_next):
     except IntegrityError:return JSONResponse({'detail':'蜂箱/巡检编号或关联冲突，请刷新后重试'},409)
     except Exception:
         logging.exception('request error');return JSONResponse({'detail':'蜂场记录暂时无法保存，请重试'},500)
-app.include_router(resources);app.include_router(seasons)
+app.include_router(resources);app.include_router(seasons);app.include_router(references)
 @app.get('/health')
 def health(db=Depends(session)):db.execute(text('SELECT 1'));queue.ping();return {'status':'ok'}
 @app.post('/auth/login')
@@ -66,7 +70,10 @@ def screening_result(jobid:str,user=Depends(current)):
     if not result:raise HTTPException(404,'筛查结果已过期，请重新筛查')
     return json.loads(result)
 @app.get('/winter-reference')
-def reference(user=Depends(current)):return reference_model()[1]
+def reference(user=Depends(current),db=Depends(session)):
+    from .reference_service import active_version,summary
+    row=active_version(db)
+    return {**reference_model()[1],'active_version':summary(row)}
 @app.get('/care')
 def care(user=Depends(current),db=Depends(session)):return db.scalars(select(CareAction).order_by(CareAction.id.desc())).all()
 @app.post('/care')

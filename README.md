@@ -100,3 +100,19 @@ Seed增加FD-202611-A可用30kg、FD-HOLD隔离8kg、FD-EXPIRED已过期5kg，�
 GET /moves /insulation-lots /insulation-installs /spring-reviews供三角色；POST /moves、complete/cancel、POST /insulation-lots、POST /insulation-installs、PUT ventilation、POST remove及POST /spring-reviews允许蜂师/主管；move approve、insulation accept、spring pass及物料隔离仅主管，viewer全部只读。各新增模型均有外键；物料数量与春检值域由数据库和Pydantic校验。
 
 Seed只在缺失时增加IN-2026-WINTER 120件，不改人工库存/安装/春检；历史winter_ready无需补装以维持历史状态，新的春检动作才要求保温。真实证据在test-artifacts/gb-1027/v3/。本地检疫留痕不替代行政检疫证；每箱每季一条春检，本演示固定2026越冬季，无跨季归档。
+
+
+## V4 参考版本试算、启用与回退
+
+原筛查参考写死在`backend/fixtures/winter_reference.json`，换季后分布漂移无法试换。新增参考版本台账，把“训练→对照→启用→回退”做成可审计工作流；新增`reference_versions`表（metadata补建，无旧表变更），原IsolationForest算法口径完全不变：`n_estimators=150,contamination=.15,random_state=42`，特征仍为weight_kg/temperature/activity/feed_left。
+
+1. **候选上传与同算法训练**：`ReferenceVersion`保存源数据JSON、规范化内容SHA、训练evidence（阈值、参考内异常数、分值区间等）。蜂师/主管可上传20–5000条候选；重名或与既有版本数据完全相同拒绝；训练失败返回422，在用版本与已有候选均不动。应用启动时把固定fixture登记为基线版本（is_baseline，第1代，evidence内SHA仍为原始文件SHA，与历史Visit.model_evidence口径一致）。
+2. **同批对照试算**：对每箱最新可筛查巡检（recorded/screened/blocked），worker用同一批Visit分别在在用版本与候选版本上打分，输出每个巡检的两侧分值/余量/异常标记及`incoming`（候选新增异常，异常转入蜂箱）、`outgoing`（候选解除异常，异常转出蜂箱）清单；结果写Redis（24小时）、共享卷`reference-{job}.json`和版本comparison字段。对照期间源数据被替换或在用版本已切换，worker校验SHA不一致即判本次对照作废、版本置failed，须重新试算。
+3. **候选源数据更新**：仅candidate/failed版本可PUT替换源数据；替换即清空原comparison（前端显示“原对照已失效，须重新试算”），重新训练后重新试算才能启用。active/retired版本冻结不可改。
+4. **启用（仅主管）与并发冲突**：只有comparison为done且对照基线（在用版本id+双方SHA）与当前完全一致才可启用。启用在事务内锁定在用版本行：两名主管并发启用不同候选时仅一个成功，另一个收到409冲突说明并清空其失效对照，须重新试算。启用后旧版本转retired、候选转active并递增active_generation，记录启用人与时间。
+5. **切换前后筛查口径**：筛查入队时把参考版本id/名称/SHA写入Redis任务，worker按入队版本加载模型并把版本信息写入Visit.model_evidence；版本切换不回写、不重算任何历史分值。切换前排队的筛查沿用入队版本，切换后新入队筛查使用新版；已有处置依据（CareAction/复查/关闭）保留原版本证据不变。
+6. **回退（仅主管）**：可回退到任一retired历史在用版本（基线也可），同样递增代际并留审计；回退不改变既有Visit分值。候选版本不能直接回退，须先走对照与启用。对照试算期间筛查功能不受影响，两队列由同一worker消费。
+
+接口：`GET /reference-versions`（含`/active`、`/{id}`）、`POST /reference-versions`（蜂师/主管）、`PUT /reference-versions/{id}`（替换候选源数据）、`POST /reference-versions/{id}/compare`、`GET /reference-jobs/{jobid}`、`POST /reference-versions/{id}/activate`与`/rollback`（仅主管，body可附reason）；viewer全程只读。`GET /winter-reference`在原evidence外附带active_version摘要。前端新增第十页`pages/references.js`：上传/替换JSON、试算轮询、异常转入/转出对照表、版本依据JSON、主管启用与回退；筛查页显示当前入队锁定的参考版本与历史分值版本，处置证据同步显示分值所属版本。
+
+模型按`版本id:内容SHA`缓存于worker/API进程内（最多16个），固定fixture的`screen()`/`reference_model()`保留兼容；seed幂等补入一个“换季候选参考V2”候选供直接试算，不自动启用。审计覆盖上传、源数据更新、对照发起、启用、回退全部动作。

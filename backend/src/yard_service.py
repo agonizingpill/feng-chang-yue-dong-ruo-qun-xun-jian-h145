@@ -32,6 +32,7 @@ def record_visit(db,body,user):
     db.add(visit);audit(db,user,f'巡箱 {hive.code} / {body.code} {body.weight_kg}kg');db.commit();return visit
 
 def enqueue_screen(db,user,queue,key=None):
+    from .reference_service import active_version
     if key:
         v=require(db,Visit,key,True)
         if latest(db,v.hive_id)!=v.id:raise HTTPException(409,'该箱已有更新巡检，请筛查最新记录')
@@ -43,6 +44,7 @@ def enqueue_screen(db,user,queue,key=None):
     for v in candidates:
         if v.status not in ['recorded','screened','blocked']:raise HTTPException(409,'已进入处置的巡检不能重新筛查或覆盖原值')
         v.status='screening'
+    ref=active_version(db)
     jobid=uuid.uuid4().hex;ids=[v.id for v in candidates]
-    audit(db,user,f'弱群筛查 {len(ids)} 箱最新巡检');db.commit()
-    queue.set('apiary:screen:'+jobid,json.dumps({'status':'queued'}),ex=86400);queue.rpush('apiary:screening',json.dumps({'job_id':jobid,'visit_ids':ids}));return {'job_id':jobid,'count':len(ids)}
+    audit(db,user,f'弱群筛查 {len(ids)} 箱最新巡检 / 参考版本 {ref.name}');db.commit()
+    queue.set('apiary:screen:'+jobid,json.dumps({'status':'queued'}),ex=86400);queue.rpush('apiary:screening',json.dumps({'job_id':jobid,'visit_ids':ids,'model_version_id':ref.id,'model_version_name':ref.name,'model_sha256':ref.data_sha256}));return {'job_id':jobid,'count':len(ids),'model_version_id':ref.id,'model_version_name':ref.name}
